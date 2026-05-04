@@ -720,6 +720,9 @@ static int pinnacle_init(const struct device *dev) {
     if (config->y_invert) {
         feed_cfg1 |= PINNACLE_FEED_CFG1_INV_Y;
     }
+    if (config->disable_filter) {
+        feed_cfg1 |= PINNACLE_FEED_CFG1_DIS_FILT;
+    }
     if (feed_cfg1) {
         ret = pinnacle_write(dev, PINNACLE_FEED_CFG1, feed_cfg1);
     }
@@ -783,6 +786,7 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .sleep_en = DT_INST_PROP(n, sleep),                                                        \
         .no_taps = DT_INST_PROP(n, no_taps),                                                       \
         .no_secondary_tap = DT_INST_PROP(n, no_secondary_tap),                                     \
+        .disable_filter = DT_INST_PROP(n, disable_filter),                                         \
         .absolute_mode = DT_INST_PROP(n, absolute_mode),                                           \
         .abs_rel_divisor = DT_INST_PROP(n, abs_rel_divisor),                                       \
         .absolute_mode_scale_to_width = DT_INST_PROP(n, absolute_mode_scale_to_width),             \
