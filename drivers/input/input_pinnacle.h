@@ -80,6 +80,8 @@ struct pinnacle_data {
     int8_t num_z_idle;
     int16_t last_x, last_y; // last abs reading
 
+    int32_t smooth_accum_x_q8, smooth_accum_y_q8;
+
     const struct device *dev;
     struct gpio_callback gpio_cb;
     struct k_work work;
@@ -106,6 +108,7 @@ struct pinnacle_config {
     pinnacle_write_t write;
 
     bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert, absolute_mode, disable_filter;
+    uint8_t smoothing_strength;
     uint8_t abs_rel_divisor;
     enum pinnacle_sensitivity sensitivity;
     uint8_t x_axis_z_min, y_axis_z_min;

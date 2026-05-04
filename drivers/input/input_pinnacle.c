@@ -235,6 +235,42 @@ static int pinnacle_era_write(const struct device *dev, const uint16_t addr, uin
     return ret;
 }
 
+static void pinnacle_apply_smoothing(struct pinnacle_data *data, uint8_t strength,
+                                     int8_t *dx, int8_t *dy) {
+    if (strength < 2) {
+        return;
+    }
+
+    int abs_dx = *dx < 0 ? -*dx : *dx;
+    int abs_dy = *dy < 0 ? -*dy : *dy;
+    int abs_total = abs_dx + abs_dy;
+
+    int gain_q8;
+    const int fast_thresh = 4;
+    if (abs_total >= fast_thresh) {
+        gain_q8 = 256;
+    } else {
+        int min_gain = 256 / strength;
+        gain_q8 = min_gain + ((256 - min_gain) * abs_total) / fast_thresh;
+    }
+
+    data->smooth_accum_x_q8 += (int32_t)*dx * gain_q8;
+    data->smooth_accum_y_q8 += (int32_t)*dy * gain_q8;
+
+    int32_t out_dx = data->smooth_accum_x_q8 / 256;
+    int32_t out_dy = data->smooth_accum_y_q8 / 256;
+    data->smooth_accum_x_q8 -= out_dx * 256;
+    data->smooth_accum_y_q8 -= out_dy * 256;
+
+    if (out_dx > INT8_MAX) out_dx = INT8_MAX;
+    if (out_dx < INT8_MIN) out_dx = INT8_MIN;
+    if (out_dy > INT8_MAX) out_dy = INT8_MAX;
+    if (out_dy < INT8_MIN) out_dy = INT8_MIN;
+
+    *dx = (int8_t)out_dx;
+    *dy = (int8_t)out_dy;
+}
+
 static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
     const struct pinnacle_config *config = dev->config;
     struct pinnacle_data *data = dev->data;
@@ -266,6 +302,8 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
             data->num_z_idle = 0;
             dx = 0;
             dy = 0; // starting a new press, must reset deltas
+            data->smooth_accum_x_q8 = 0;
+            data->smooth_accum_y_q8 = 0;
         }
     } else {
         data->num_z_idle++;
@@ -285,9 +323,11 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
         must_send = true;
     }
 
+    pinnacle_apply_smoothing(data, config->smoothing_strength, &dx, &dy);
+
     if(must_send) {
         input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
-        input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER); 
+        input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER);
     }
 }
 
@@ -787,6 +827,7 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .no_taps = DT_INST_PROP(n, no_taps),                                                       \
         .no_secondary_tap = DT_INST_PROP(n, no_secondary_tap),                                     \
         .disable_filter = DT_INST_PROP(n, disable_filter),                                         \
+        .smoothing_strength = DT_INST_PROP(n, smoothing_strength),                                 \
         .absolute_mode = DT_INST_PROP(n, absolute_mode),                                           \
         .abs_rel_divisor = DT_INST_PROP(n, abs_rel_divisor),                                       \
         .absolute_mode_scale_to_width = DT_INST_PROP(n, absolute_mode_scale_to_width),             \

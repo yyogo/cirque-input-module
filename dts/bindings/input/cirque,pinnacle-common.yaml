@@ -20,6 +20,15 @@ properties:
       Disable the on-chip IIR averaging filter (FEED_CFG1.DIS_FILT).
       Reduces cursor latency by ~10-20 ms at the cost of increased
       sample-to-sample jitter on slow movements.
+  smoothing-strength:
+    type: int
+    default: 0
+    description: |
+      Velocity-adaptive smoothing applied in the driver after each
+      report. 0 = disabled (passthrough). Values 2..16 attenuate slow
+      motion by up to 1/N at zero velocity (sub-pixel remainder is
+      retained), passing fast motion through unfiltered. Useful to
+      cancel chip-level jitter when 'disable-filter' is set.
   sensitivity:
     type: string
     enum:
