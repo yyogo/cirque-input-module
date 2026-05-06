@@ -21,18 +21,27 @@ static int pinnacle_write(const struct device *dev, const uint8_t addr, const ui
     return config->write(dev, addr, val);
 }
 
-// Now that we are counting ZIDLEs it would be very bad to miss one.  But in my testing I see that happen (rarely - once every
-// couple of days of usage).  The fact that the current irq system is edge triggered probably isn't great for this reason.
-// But for now just have the touch controller emit NUM_ZIDLE_PAD extra idles
-#define NUM_ZIDLE  3
+// We count Z-idle packets (z=0) to detect lift. Profiling shows that
+// firm-fingertip holds produce frequent 1-2 sample z=0 dropouts mid-
+// touch -- the chip's contact-area detection flickers near threshold.
+// A 3-sample debounce reads those as phantom lifts and causes ghost
+// taps + erratic motion; bumped to 5 (~25 ms at 200 sps) which still
+// absorbs those dropouts. Cost: lift latency goes from ~15 ms to
+// ~25 ms at 200 sps.
+#define NUM_ZIDLE  5
 #define NUM_ZIDLE_PAD 2
 
 // Fast-tap thresholds (when tap_fast DT prop is set).
 #define TAP_FAST_MAX_MS         250  // lift-by deadline for a touch to count as a tap
 #define TAP_FAST_BUFFER_MS      120  // motion held back for at most this long; absorbs tap noise without making slow drags feel laggy
 #define TAP_FAST_MAX_DRAG        25  // motion budget within the tap window before it's reclassified as a drag
-#define TAP_FAST_DRAG_WINDOW_MS 150  // window after a tap during which a new touch becomes a held-click drag
-#define TAP_FAST_PHANTOM_MS     150  // post-lift window where a touch resume with no synthesized tap is treated as chip-noise (light hold flickering z=0), not a fresh touch
+#define TAP_FAST_DRAG_WINDOW_MS  80  // window after a tap during which a new touch becomes a held-click drag
+// Phantom-resume suppression was added to swallow chip-noise z=0 dropouts
+// mid-touch. Once the z bit-mask bug was fixed (was 0x1F, now 0x3F) those
+// dropouts disappeared from the data -- they were z values >=32 wrapping.
+// Set to 0 to disable; keeps the code path in place for easy re-enable if
+// real chip noise shows up in future captures.
+#define TAP_FAST_PHANTOM_MS       0
 
 #if DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
 
@@ -365,6 +374,7 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
             data->tap_buf_dx = 0;
             data->tap_buf_dy = 0;
             data->tap_motion_total = 0;
+            data->tap_motion_committed = 0;
             data->tap_buffering = true;
             data->tap_eligible = true;
 
@@ -384,12 +394,18 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
         if (is_touching && (data->tap_buffering || data->tap_eligible)) {
             int abs_dx = dx < 0 ? -dx : dx;
             int abs_dy = dy < 0 ? -dy : dy;
+            // Commit the prior sample's motion before adding this one. The
+            // latest sample stays "tentative": if it turns out to be the
+            // last sample of the touch (often the lift-artifact one with a
+            // big centroid jump) it never gets committed and never counts
+            // against tap eligibility.
+            data->tap_motion_committed = data->tap_motion_total;
             data->tap_motion_total += abs_dx + abs_dy;
             data->tap_buf_dx += dx;
             data->tap_buf_dy += dy;
             int64_t duration = now - data->tap_touch_started_ms;
 
-            if (data->tap_motion_total > TAP_FAST_MAX_DRAG ||
+            if (data->tap_motion_committed > TAP_FAST_MAX_DRAG ||
                 duration > TAP_FAST_MAX_MS) {
                 data->tap_eligible = false;
             }
@@ -530,7 +546,11 @@ static int pinnacle_read_abs(const struct device *dev) {
     uint8_t xy_high = packet[4];
     data->last_x = ((xy_high & 0x0F) << 8) | x_low;
     data->last_y = ((xy_high & 0xF0) << 4) | y_low;
-    data->last_z = (uint8_t)(packet[5] & 0x1F);
+    // Z is 6 bits (range 0-63) per the Pinnacle spec: PacketByte_5 layout
+    // is [Touch | 0 | Z5 | Z4 | Z3 | Z2 | Z1 | Z0]. The driver originally
+    // masked with 0x1F (5 bits), which silently wraps any z>=32 to z%32 --
+    // visible as a square-wave in firm-contact captures.
+    data->last_z = (uint8_t)(packet[5] & 0x3F);
 
     LOG_DBG("button: %d, x: %d y: %d z: %d", data->last_btn, data->last_x, data->last_y, data->last_z);
     return 0;

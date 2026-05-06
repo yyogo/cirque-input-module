@@ -96,7 +96,8 @@ struct pinnacle_data {
     // Driver-side fast-tap detection (when tap_fast is set in config).
     int64_t tap_touch_started_ms;
     int32_t tap_buf_dx, tap_buf_dy;   // motion buffered during the could-be-tap window
-    int32_t tap_motion_total;         // running sum of |dx|+|dy| during this touch
+    int32_t tap_motion_total;         // running sum of |dx|+|dy| during this touch (includes the latest "tentative" sample)
+    int32_t tap_motion_committed;     // motion total excluding the latest sample; what tap eligibility is checked against (so a lift-artifact last sample can't disqualify a tap)
     bool tap_buffering;               // true while motion is being held back
     bool tap_eligible;                // true while a lift-now would synthesize a click
     int64_t tap_completed_ms;         // timestamp of last synthesized tap (for tap-and-drag)
