@@ -82,6 +82,10 @@ struct pinnacle_data {
 
     int32_t smooth_accum_x_q8, smooth_accum_y_q8;
 
+    // Driver-side fast-tap detection (when tap_fast is set in config).
+    int64_t tap_touch_started_ms;
+    int32_t tap_touch_motion;
+
     const struct device *dev;
     struct gpio_callback gpio_cb;
     struct k_work work;
@@ -107,7 +111,7 @@ struct pinnacle_config {
     pinnacle_seq_read_t seq_read;
     pinnacle_write_t write;
 
-    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert, absolute_mode, disable_filter;
+    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert, absolute_mode, disable_filter, tap_fast;
     uint8_t smoothing_strength;
     uint8_t abs_rel_divisor;
     enum pinnacle_sensitivity sensitivity;

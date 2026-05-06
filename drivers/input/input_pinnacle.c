@@ -27,6 +27,10 @@ static int pinnacle_write(const struct device *dev, const uint8_t addr, const ui
 #define NUM_ZIDLE  3
 #define NUM_ZIDLE_PAD 2
 
+// Fast-tap thresholds (when tap_fast DT prop is set).
+#define TAP_FAST_MAX_MS    200    // touch must lift within this window
+#define TAP_FAST_MAX_DRAG  10     // and total reported motion must stay under this
+
 #if DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
 
 static int pinnacle_i2c_seq_read(const struct device *dev, const uint8_t addr, uint8_t *buf,
@@ -304,6 +308,10 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
             dy = 0; // starting a new press, must reset deltas
             data->smooth_accum_x_q8 = 0;
             data->smooth_accum_y_q8 = 0;
+            // Fast-tap: capture touch-start so we can measure duration
+            // and motion when (and if) the lift is detected below.
+            data->tap_touch_started_ms = k_uptime_get();
+            data->tap_touch_motion = 0;
         }
     } else {
         data->num_z_idle++;
@@ -324,6 +332,24 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
     }
 
     pinnacle_apply_smoothing(data, config->smoothing_strength, &dx, &dy);
+
+    // Fast-tap accounting: accumulate motion that happened during this
+    // touch, and on the lift edge synthesize a primary-button click if
+    // the touch was short and didn't drag.
+    if (config->tap_fast) {
+        if (is_touching) {
+            int abs_dx = dx < 0 ? -dx : dx;
+            int abs_dy = dy < 0 ? -dy : dy;
+            data->tap_touch_motion += abs_dx + abs_dy;
+        } else if (touch_changed) {
+            int64_t duration = k_uptime_get() - data->tap_touch_started_ms;
+            if (duration < TAP_FAST_MAX_MS &&
+                data->tap_touch_motion < TAP_FAST_MAX_DRAG) {
+                input_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
+                input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+            }
+        }
+    }
 
     if(must_send) {
         input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
@@ -730,11 +756,11 @@ static int pinnacle_init(const struct device *dev) {
     }
 
     uint8_t feed_cfg2 = PINNACLE_FEED_CFG2_EN_IM | PINNACLE_FEED_CFG2_EN_BTN_SCRL;
-    if (config->no_taps) {
+    if (config->no_taps || config->tap_fast) {
         feed_cfg2 |= PINNACLE_FEED_CFG2_DIS_TAP;
     }
 
-    if (config->no_secondary_tap) {
+    if (config->no_secondary_tap || config->tap_fast) {
         feed_cfg2 |= PINNACLE_FEED_CFG2_DIS_SEC;
     }
 
@@ -828,6 +854,7 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .no_secondary_tap = DT_INST_PROP(n, no_secondary_tap),                                     \
         .disable_filter = DT_INST_PROP(n, disable_filter),                                         \
         .smoothing_strength = DT_INST_PROP(n, smoothing_strength),                                 \
+        .tap_fast = DT_INST_PROP(n, tap_fast),                                                     \
         .absolute_mode = DT_INST_PROP(n, absolute_mode),                                           \
         .abs_rel_divisor = DT_INST_PROP(n, abs_rel_divisor),                                       \
         .absolute_mode_scale_to_width = DT_INST_PROP(n, absolute_mode_scale_to_width),             \

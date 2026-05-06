@@ -29,6 +29,15 @@ properties:
       motion by up to 1/N at zero velocity (sub-pixel remainder is
       retained), passing fast motion through unfiltered. Useful to
       cancel chip-level jitter when 'disable-filter' is set.
+  tap-fast:
+    type: boolean
+    description: |
+      Bypass the chip's tap state machine (which adds ~200 ms of
+      tap-confirmation latency) and emit BTN_PRIM press+release in
+      the driver as soon as the touch state machine sees the lift,
+      provided the touch was short and didn't drag. Implies the
+      chip's DIS_TAP and DIS_SEC bits so the chip's own taps don't
+      double-fire on top.
   sensitivity:
     type: string
     enum:
