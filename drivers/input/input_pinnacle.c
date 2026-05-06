@@ -28,8 +28,10 @@ static int pinnacle_write(const struct device *dev, const uint8_t addr, const ui
 #define NUM_ZIDLE_PAD 2
 
 // Fast-tap thresholds (when tap_fast DT prop is set).
-#define TAP_FAST_MAX_MS    200    // touch must lift within this window
-#define TAP_FAST_MAX_DRAG  10     // and total reported motion must stay under this
+#define TAP_FAST_MAX_MS         250  // lift-by deadline for a touch to count as a tap
+#define TAP_FAST_BUFFER_MS      120  // motion held back for at most this long; absorbs tap noise without making slow drags feel laggy
+#define TAP_FAST_MAX_DRAG        25  // motion budget within the tap window before it's reclassified as a drag
+#define TAP_FAST_DRAG_WINDOW_MS 150  // window after a tap during which a new touch becomes a held-click drag
 
 #if DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
 
@@ -308,10 +310,6 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
             dy = 0; // starting a new press, must reset deltas
             data->smooth_accum_x_q8 = 0;
             data->smooth_accum_y_q8 = 0;
-            // Fast-tap: capture touch-start so we can measure duration
-            // and motion when (and if) the lift is detected below.
-            data->tap_touch_started_ms = k_uptime_get();
-            data->tap_touch_motion = 0;
         }
     } else {
         data->num_z_idle++;
@@ -333,21 +331,82 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
 
     pinnacle_apply_smoothing(data, config->smoothing_strength, &dx, &dy);
 
-    // Fast-tap accounting: accumulate motion that happened during this
-    // touch, and on the lift edge synthesize a primary-button click if
-    // the touch was short and didn't drag.
+    // Fast-tap state machine: hold motion back during the could-be-tap
+    // window so a tap with slight finger drift doesn't drag the cursor;
+    // synthesize a click on a quick lift; if a new touch arrives soon
+    // after that click, treat it as a held-button drag.
     if (config->tap_fast) {
-        if (is_touching) {
+        int64_t now = k_uptime_get();
+
+        if (touch_changed && is_touching) {
+            data->tap_touch_started_ms = now;
+            data->tap_buf_dx = 0;
+            data->tap_buf_dy = 0;
+            data->tap_motion_total = 0;
+            data->tap_buffering = true;
+            data->tap_eligible = true;
+
+            // Drag-and-hold: a fresh touch within the post-tap window means
+            // the user wants the previous click to "stick" — emit BTN_PRIM
+            // press now, hold until lift, no buffering on this touch.
+            if (data->tap_completed_ms != 0 &&
+                now - data->tap_completed_ms < TAP_FAST_DRAG_WINDOW_MS) {
+                input_report_key(dev, INPUT_BTN_0, 1, false, K_FOREVER);
+                data->tap_drag_held = true;
+                data->tap_buffering = false;
+                data->tap_eligible = false;
+            }
+            data->tap_completed_ms = 0;
+        }
+
+        if (is_touching && (data->tap_buffering || data->tap_eligible)) {
             int abs_dx = dx < 0 ? -dx : dx;
             int abs_dy = dy < 0 ? -dy : dy;
-            data->tap_touch_motion += abs_dx + abs_dy;
-        } else if (touch_changed) {
-            int64_t duration = k_uptime_get() - data->tap_touch_started_ms;
-            if (duration < TAP_FAST_MAX_MS &&
-                data->tap_touch_motion < TAP_FAST_MAX_DRAG) {
+            data->tap_motion_total += abs_dx + abs_dy;
+            data->tap_buf_dx += dx;
+            data->tap_buf_dy += dy;
+            int64_t duration = now - data->tap_touch_started_ms;
+
+            if (data->tap_motion_total > TAP_FAST_MAX_DRAG ||
+                duration > TAP_FAST_MAX_MS) {
+                data->tap_eligible = false;
+            }
+
+            if (data->tap_buffering) {
+                // Flush only when motion is real or the user is clearly
+                // dragging — a still finger past BUFFER_MS keeps buffering
+                // so a slow tap (held still then lifted) still clicks.
+                bool motion_flush = data->tap_motion_total > TAP_FAST_MAX_DRAG;
+                bool time_flush = data->tap_motion_total > 0 &&
+                                  duration > TAP_FAST_BUFFER_MS;
+                if (motion_flush || time_flush) {
+                    int32_t fx = data->tap_buf_dx;
+                    int32_t fy = data->tap_buf_dy;
+                    if (fx > INT8_MAX) fx = INT8_MAX;
+                    if (fx < INT8_MIN) fx = INT8_MIN;
+                    if (fy > INT8_MAX) fy = INT8_MAX;
+                    if (fy < INT8_MIN) fy = INT8_MIN;
+                    dx = (int8_t)fx;
+                    dy = (int8_t)fy;
+                    data->tap_buffering = false;
+                } else {
+                    dx = 0;
+                    dy = 0;
+                }
+            }
+        }
+
+        if (touch_changed && !is_touching) {
+            if (data->tap_drag_held) {
+                input_report_key(dev, INPUT_BTN_0, 0, false, K_FOREVER);
+                data->tap_drag_held = false;
+            } else if (data->tap_eligible) {
                 input_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER);
                 input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+                data->tap_completed_ms = now;
             }
+            data->tap_buffering = false;
+            data->tap_eligible = false;
         }
     }
 

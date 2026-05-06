@@ -84,7 +84,12 @@ struct pinnacle_data {
 
     // Driver-side fast-tap detection (when tap_fast is set in config).
     int64_t tap_touch_started_ms;
-    int32_t tap_touch_motion;
+    int32_t tap_buf_dx, tap_buf_dy;   // motion buffered during the could-be-tap window
+    int32_t tap_motion_total;         // running sum of |dx|+|dy| during this touch
+    bool tap_buffering;               // true while motion is being held back
+    bool tap_eligible;                // true while a lift-now would synthesize a click
+    int64_t tap_completed_ms;         // timestamp of last synthesized tap (for tap-and-drag)
+    bool tap_drag_held;               // true while a synthesized BTN_PRIM is held for a drag
 
     const struct device *dev;
     struct gpio_callback gpio_cb;
