@@ -17,6 +17,18 @@ config INPUT_PINNACLE_INIT_PRIORITY
     int "Cirque Pinnacle initialization priority"
     default INPUT_INIT_PRIORITY
 
+config INPUT_PINNACLE_PROFILE_DUMP
+    bool "Dump raw Pinnacle samples over the console (profiling mode)"
+    default n
+    help
+      When enabled, the driver bypasses all post-processing
+      (smoothing, abs-rel divisor, tap-fast, lookahead) and prints
+      one CSV row per chip sample to the system console:
+        t_ms,btn,x,y,z
+      Forces the chip into absolute-mode reporting regardless of
+      DT settings so the dump always carries raw positions. Intended
+      for offline analysis of trackpad behavior; do not ship.
+
 if ZMK_MOUSE
 
 config ZMK_INPUT_PINNACLE_IDLE_SLEEPER

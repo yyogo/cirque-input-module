@@ -32,6 +32,7 @@ static int pinnacle_write(const struct device *dev, const uint8_t addr, const ui
 #define TAP_FAST_BUFFER_MS      120  // motion held back for at most this long; absorbs tap noise without making slow drags feel laggy
 #define TAP_FAST_MAX_DRAG        25  // motion budget within the tap window before it's reclassified as a drag
 #define TAP_FAST_DRAG_WINDOW_MS 150  // window after a tap during which a new touch becomes a held-click drag
+#define TAP_FAST_PHANTOM_MS     150  // post-lift window where a touch resume with no synthesized tap is treated as chip-noise (light hold flickering z=0), not a fresh touch
 
 #if DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
 
@@ -331,14 +332,35 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
 
     pinnacle_apply_smoothing(data, config->smoothing_strength, &dx, &dy);
 
+    // The chip-level touch_changed flag fires on any z=0 -> z>0 resume,
+    // including transients mid-touch. NUM_ZIDLE filters very short z=0
+    // glitches but a light hold can have z dip below the chip's contact
+    // threshold for longer than that, so we add a second filter: any
+    // touch that resumes within PHANTOM_MS of a confirmed lift, when
+    // no tap fired between, is treated as chip-noise continuation.
+    int64_t now_ms = k_uptime_get();
+    bool resumed = touch_changed && is_touching && !data->touch_active;
+    bool phantom_resume = resumed &&
+                          data->last_lift_ms != 0 &&
+                          now_ms - data->last_lift_ms < TAP_FAST_PHANTOM_MS &&
+                          data->tap_completed_ms == 0;
+    bool real_touch_start = resumed && !phantom_resume;
+    if (touch_changed && is_touching) {
+        data->touch_active = true;
+    }
+    if (touch_changed && !is_touching) {
+        data->touch_active = false;
+        data->last_lift_ms = now_ms;
+    }
+
     // Fast-tap state machine: hold motion back during the could-be-tap
     // window so a tap with slight finger drift doesn't drag the cursor;
     // synthesize a click on a quick lift; if a new touch arrives soon
     // after that click, treat it as a held-button drag.
     if (config->tap_fast) {
-        int64_t now = k_uptime_get();
+        int64_t now = now_ms;
 
-        if (touch_changed && is_touching) {
+        if (real_touch_start) {
             data->tap_touch_started_ms = now;
             data->tap_buf_dx = 0;
             data->tap_buf_dy = 0;
@@ -409,6 +431,27 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
             data->tap_eligible = false;
         }
     }
+
+    // 1-sample lookahead. Hold this sample's motion in a pending slot and
+    // ship the previous sample's. Discard pending only at the confirmed
+    // lift edge -- a z=0 mid-touch (chip noise within the NUM_ZIDLE
+    // debounce window) must NOT drop the held motion, otherwise every
+    // transient looks like a stutter.
+    if (touch_changed && !is_touching) {
+        data->pending_dx = 0;
+        data->pending_dy = 0;
+        data->has_pending = false;
+    } else if (is_touching) {
+        int8_t out_dx = data->has_pending ? data->pending_dx : 0;
+        int8_t out_dy = data->has_pending ? data->pending_dy : 0;
+        data->pending_dx = dx;
+        data->pending_dy = dy;
+        data->has_pending = true;
+        dx = out_dx;
+        dy = out_dy;
+    }
+    // else: !is_touching but no touch edge yet (mid-debounce). dx,dy are
+    // already 0 from the touch-state branch above; leave pending alone.
 
     if(must_send) {
         input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
@@ -561,9 +604,32 @@ static void pinnacle_report_data_rel(const struct device *dev) {
     pinnacle_send_rel(dev, (int8_t) dx, (int8_t) dy);
 }
 
+#if IS_ENABLED(CONFIG_INPUT_PINNACLE_PROFILE_DUMP)
+// Profiling mode: read the chip's abs packet, print one CSV row, re-arm
+// the interrupt. All driver-side processing (smoothing, abs-rel diff,
+// tap-fast, lookahead, button reporting) is skipped so the host sees
+// chip-faithful data.
+static void pinnacle_dump_sample(const struct device *dev) {
+    int ret = pinnacle_read_abs(dev);
+    if (ret == 0) {
+        struct pinnacle_data *data = dev->data;
+        printk("%lld,%u,%d,%d,%u\n",
+               (long long)k_uptime_get(),
+               data->last_btn,
+               data->last_x, data->last_y, data->last_z);
+    }
+    pinnacle_clear_status(dev);
+    set_int(dev, true);
+}
+#endif
+
 static void pinnacle_work_cb(struct k_work *work) {
     struct pinnacle_data *data = CONTAINER_OF(work, struct pinnacle_data, work);
     const struct device *dev = data->dev;
+#if IS_ENABLED(CONFIG_INPUT_PINNACLE_PROFILE_DUMP)
+    pinnacle_dump_sample(dev);
+    return;
+#else
     const struct pinnacle_config *config = dev->config;
 
     if (config->absolute_mode) {
@@ -573,6 +639,7 @@ static void pinnacle_work_cb(struct k_work *work) {
     } else {
         pinnacle_report_data_rel(dev);
     }
+#endif
 }
 
 static void pinnacle_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
@@ -832,7 +899,8 @@ static int pinnacle_init(const struct device *dev) {
         return ret;
     }
     uint8_t feed_cfg1 = PINNACLE_FEED_CFG1_EN_FEED;
-    if (config->absolute_mode || config->abs_rel_divisor) {
+    if (IS_ENABLED(CONFIG_INPUT_PINNACLE_PROFILE_DUMP) ||
+        config->absolute_mode || config->abs_rel_divisor) {
         feed_cfg1 |= PINNACLE_FEED_CFG1_ABS_MODE;
         LOG_ERR("Using absolute mode");
     } else {

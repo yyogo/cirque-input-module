@@ -82,6 +82,17 @@ struct pinnacle_data {
 
     int32_t smooth_accum_x_q8, smooth_accum_y_q8;
 
+    // 1-sample lookahead so the final touching sample (often the lift
+    // artifact) can be discarded instead of shipped.
+    int8_t pending_dx, pending_dy;
+    bool has_pending;
+
+    // Latched touch state -- only flips on confirmed lift edges (NUM_ZIDLE
+    // hit), so transient z=0 samples mid-touch don't masquerade as a
+    // fresh touch start to the tap-fast state machine.
+    bool touch_active;
+    int64_t last_lift_ms;  // timestamp of last confirmed lift edge
+
     // Driver-side fast-tap detection (when tap_fast is set in config).
     int64_t tap_touch_started_ms;
     int32_t tap_buf_dx, tap_buf_dy;   // motion buffered during the could-be-tap window
