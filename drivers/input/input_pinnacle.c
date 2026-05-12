@@ -346,8 +346,12 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
 
     if(touch_changed)
     {
-        // Finalize the input event only if we have something to report
-        input_report_key(dev, INPUT_BTN_TOUCH, is_touching ? 1 : 0, false, K_FOREVER);
+        // Upstream ZMK's pointing input_listener (post-bump) maps
+        // INPUT_BTN_TOUCH to mouse button 0, so emitting it here turns
+        // every finger contact into a left click. Actual clicks are
+        // produced by the tap-fast machinery below via INPUT_BTN_0.
+        // Force a flush so a touch-edge sample (often dx=dy=0 at lift)
+        // still gets sent and downstream sees the syn.
         must_send = true;
     }
 
