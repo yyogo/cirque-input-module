@@ -11,6 +11,14 @@
 
 LOG_MODULE_REGISTER(pinnacle, CONFIG_INPUT_LOG_LEVEL);
 
+// Diagnostic hooks. Production builds get the weak no-op versions; a
+// diagnostic build (e.g. toucan's heartbeat firmware) can provide strong
+// overrides to track SPI transaction lifecycle or to route the work item
+// onto a dedicated work queue instead of the system work queue.
+__weak void pinnacle_instrument_spi_enter(void) {}
+__weak void pinnacle_instrument_spi_exit(void) {}
+__weak struct k_work_q *pinnacle_work_q(void) { return NULL; }
+
 static int pinnacle_seq_read(const struct device *dev, const uint8_t addr, uint8_t *buf,
                              const uint8_t len) {
     const struct pinnacle_config *config = dev->config;
@@ -91,7 +99,9 @@ static int pinnacle_spi_seq_read(const struct device *dev, const uint8_t addr, u
         .buffers = rx_buf,
         .count = 2,
     };
+    pinnacle_instrument_spi_enter();
     int ret = spi_transceive_dt(&config->bus.spi, &tx, &rx);
+    pinnacle_instrument_spi_exit();
 
     return ret;
 }
@@ -119,7 +129,9 @@ static int pinnacle_spi_write(const struct device *dev, const uint8_t addr, cons
         .count = 1,
     };
 
+    pinnacle_instrument_spi_enter();
     const int ret = spi_transceive_dt(&config->bus.spi, &tx, &rx);
+    pinnacle_instrument_spi_exit();
 
     if (ret < 0) {
         LOG_ERR("spi ret: %d", ret);
@@ -667,7 +679,13 @@ static void pinnacle_gpio_cb(const struct device *port, struct gpio_callback *cb
 
     LOG_DBG("HW DR asserted");
     set_int(data->dev, false); // mask the int until we've handled it (now level triggered)
-    k_work_submit(&data->work);
+
+    struct k_work_q *q = pinnacle_work_q();
+    if (q) {
+        k_work_submit_to_queue(q, &data->work);
+    } else {
+        k_work_submit(&data->work);
+    }
 }
 
 static int pinnacle_adc_sensitivity_reg_value(enum pinnacle_sensitivity sensitivity) {
