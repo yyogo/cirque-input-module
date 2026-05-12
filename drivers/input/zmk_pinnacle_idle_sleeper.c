@@ -13,7 +13,7 @@ LOG_MODULE_REGISTER(pinnacle_sleeper, CONFIG_INPUT_LOG_LEVEL);
 #define GET_PINNACLE(node_id) DEVICE_DT_GET(node_id),
 
 static const struct device *pinnacle_devs[] = {
-    DT_FOREACH_STATUS_OKAY(cirque_pinnacle, GET_PINNACLE)
+    DT_FOREACH_STATUS_OKAY(cirque_pinnacle_toucan, GET_PINNACLE)
 };
 
 static int on_activity_state(const zmk_event_t *eh) {

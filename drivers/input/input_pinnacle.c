@@ -1,4 +1,4 @@
-#define DT_DRV_COMPAT cirque_pinnacle
+#define DT_DRV_COMPAT cirque_pinnacle_toucan
 
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/init.h>
@@ -636,7 +636,7 @@ static void pinnacle_report_data_rel(const struct device *dev) {
     pinnacle_send_rel(dev, (int8_t) dx, (int8_t) dy);
 }
 
-#if IS_ENABLED(CONFIG_INPUT_PINNACLE_PROFILE_DUMP)
+#if IS_ENABLED(CONFIG_INPUT_PINNACLE_TOUCAN_PROFILE_DUMP)
 // Profiling mode: read the chip's abs packet, print one CSV row, re-arm
 // the interrupt. All driver-side processing (smoothing, abs-rel diff,
 // tap-fast, lookahead, button reporting) is skipped so the host sees
@@ -658,7 +658,7 @@ static void pinnacle_dump_sample(const struct device *dev) {
 static void pinnacle_work_cb(struct k_work *work) {
     struct pinnacle_data *data = CONTAINER_OF(work, struct pinnacle_data, work);
     const struct device *dev = data->dev;
-#if IS_ENABLED(CONFIG_INPUT_PINNACLE_PROFILE_DUMP)
+#if IS_ENABLED(CONFIG_INPUT_PINNACLE_TOUCAN_PROFILE_DUMP)
     pinnacle_dump_sample(dev);
     return;
 #else
@@ -937,7 +937,7 @@ static int pinnacle_init(const struct device *dev) {
         return ret;
     }
     uint8_t feed_cfg1 = PINNACLE_FEED_CFG1_EN_FEED;
-    if (IS_ENABLED(CONFIG_INPUT_PINNACLE_PROFILE_DUMP) ||
+    if (IS_ENABLED(CONFIG_INPUT_PINNACLE_TOUCAN_PROFILE_DUMP) ||
         config->absolute_mode || config->abs_rel_divisor) {
         feed_cfg1 |= PINNACLE_FEED_CFG1_ABS_MODE;
         LOG_ERR("Using absolute mode");
@@ -1035,7 +1035,7 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
     };                                                                                             \
     PM_DEVICE_DT_INST_DEFINE(n, pinnacle_pm_action);                                               \
     DEVICE_DT_INST_DEFINE(n, pinnacle_init, PM_DEVICE_DT_INST_GET(n), &pinnacle_data_##n,          \
-                          &pinnacle_config_##n, POST_KERNEL, CONFIG_INPUT_PINNACLE_INIT_PRIORITY,  \
+                          &pinnacle_config_##n, POST_KERNEL, CONFIG_INPUT_PINNACLE_TOUCAN_INIT_PRIORITY,  \
                           NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(PINNACLE_INST)

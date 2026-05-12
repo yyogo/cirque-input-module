@@ -1,23 +1,26 @@
 # Copyright (c) 2022 The ZMK Contributors
 # SPDX-License-Identifier: MIT
 
-menuconfig INPUT_PINNACLE
-    bool "Cirque Pinnacle trackpads"
+menuconfig INPUT_PINNACLE_TOUCAN
+    bool "Cirque Pinnacle trackpads (Toucan fork)"
     default y
     depends on GPIO
     depends on SPI || I2C
     depends on INPUT
-    depends on DT_HAS_CIRQUE_PINNACLE_ENABLED
+    depends on DT_HAS_CIRQUE_PINNACLE_TOUCAN_ENABLED
     help
-      Enable driver for Cirque Pinnacle trackpads
+      Enable the Toucan-forked Cirque Pinnacle trackpad driver. Distinct
+      from Zephyr 4.1's upstream INPUT_PINNACLE driver; this fork uses
+      compatible "cirque,pinnacle-toucan" and a different overlay
+      property set (tap-fast, smoothing-strength, abs-rel-divisor, etc.).
 
-if INPUT_PINNACLE
+if INPUT_PINNACLE_TOUCAN
 
-config INPUT_PINNACLE_INIT_PRIORITY
+config INPUT_PINNACLE_TOUCAN_INIT_PRIORITY
     int "Cirque Pinnacle initialization priority"
     default INPUT_INIT_PRIORITY
 
-config INPUT_PINNACLE_PROFILE_DUMP
+config INPUT_PINNACLE_TOUCAN_PROFILE_DUMP
     bool "Dump raw Pinnacle samples over the console (profiling mode)"
     default n
     help
@@ -31,7 +34,7 @@ config INPUT_PINNACLE_PROFILE_DUMP
 
 if ZMK_MOUSE
 
-config ZMK_INPUT_PINNACLE_IDLE_SLEEPER
+config ZMK_INPUT_PINNACLE_TOUCAN_IDLE_SLEEPER
     bool "Pinnacle Sleep linked to ZMK idle state"
     default n
 
