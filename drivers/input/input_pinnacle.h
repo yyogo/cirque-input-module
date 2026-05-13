@@ -82,6 +82,15 @@ struct pinnacle_data {
 
     int32_t smooth_accum_x_q8, smooth_accum_y_q8;
 
+    // Lift-jitter filter state (when lift_filter is enabled in config).
+    // Z trajectory is the primary signal: pressure drops monotonically as
+    // the contact patch shrinks before lift. Smoothed velocity is the
+    // secondary gate so flicks (high velocity + Z dropping) pass through.
+    uint8_t z_history[4];      // ring buffer of last 4 z values (~40ms @ 100Hz)
+    uint8_t z_history_idx;
+    uint8_t z_peak;            // running max Z this touch
+    int32_t vel_smoothed_q8;   // Q8 EMA of |dx|+|dy|, post-smoothing
+
     // 1-sample lookahead so the final touching sample (often the lift
     // artifact) can be discarded instead of shipped.
     int8_t pending_dx, pending_dy;
@@ -128,7 +137,7 @@ struct pinnacle_config {
     pinnacle_seq_read_t seq_read;
     pinnacle_write_t write;
 
-    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert, absolute_mode, disable_filter, tap_fast;
+    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert, absolute_mode, disable_filter, tap_fast, lift_filter;
     uint8_t smoothing_strength;
     uint8_t abs_rel_divisor;
     enum pinnacle_sensitivity sensitivity;

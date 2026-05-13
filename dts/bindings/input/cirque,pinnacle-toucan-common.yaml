@@ -38,6 +38,16 @@ properties:
       provided the touch was short and didn't drag. Implies the
       chip's DIS_TAP and DIS_SEC bits so the chip's own taps don't
       double-fire on top.
+  lift-filter:
+    type: boolean
+    description: |
+      Suppress lift-edge cursor jitter. After a touch has had real
+      motion and then settled (small motion for ~30 ms), the driver
+      zeros further motion below an 8-unit breakout threshold until
+      either lift or a deliberate finger re-push. Filters out the
+      centroid-shift artifact that rides through smoothing and the
+      1-sample lookahead at lift, which would otherwise bump the
+      cursor off whatever target the user just aimed at.
   sensitivity:
     type: string
     enum:

@@ -51,6 +51,21 @@ static int pinnacle_write(const struct device *dev, const uint8_t addr, const ui
 // real chip noise shows up in future captures.
 #define TAP_FAST_PHANTOM_MS       0
 
+// Lift-jitter filter (when lift_filter DT prop is set). Pattern: as the
+// finger lifts, the contact patch shrinks; the chip's Z drops over the
+// final 2-3 samples and the reported centroid shifts. We detect this
+// by Z trajectory (peak captured, current Z below a fraction of peak,
+// slope negative across a ~40ms window) and require smoothed velocity
+// to also be low so deliberate flicks-into-lift aren't suppressed.
+// Constants tuned via tools/sim_lift_filter.py against the captures
+// in captures/profile_20260506_144124.csv -- mirror any changes to
+// the sim and re-run before flashing.
+#define LIFT_FILTER_Z_HIST_LEN    4         // ~40ms at 100Hz
+#define LIFT_FILTER_Z_PEAK_MIN    15        // touch had real contact, not chip noise
+#define LIFT_FILTER_Z_DROP_PCT    60        // current Z below 60% of peak
+#define LIFT_FILTER_Z_DROP_DELTA  5         // Z dropped >=5 across the window
+#define LIFT_FILTER_VEL_LOW_Q8    (3 * 256) // smoothed velocity below 3 units/sample
+
 #if DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
 
 static int pinnacle_i2c_seq_read(const struct device *dev, const uint8_t addr, uint8_t *buf,
@@ -376,6 +391,48 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
     if (touch_changed && !is_touching) {
         data->touch_active = false;
         data->last_lift_ms = now_ms;
+    }
+
+    // Lift-jitter filter. Runs BEFORE the 1-sample lookahead and tap_fast,
+    // so when triggered: the lookahead pends a zero and ships the previous
+    // (real-motion) sample, then drops the pending zero at the confirmed
+    // lift edge -- the artifact never reaches the host. tap_motion_total
+    // isn't charged by the zeroed sample, so tap classification stays clean.
+    if (config->lift_filter) {
+        if (real_touch_start) {
+            memset(data->z_history, 0, sizeof(data->z_history));
+            data->z_history_idx = 0;
+            data->z_peak = 0;
+            data->vel_smoothed_q8 = 0;
+        }
+        if (is_touching) {
+            uint8_t z_now = (uint8_t)data->last_z;
+            // Push current z, advance idx, read about-to-be-overwritten
+            // slot as the oldest (Z_HIST_LEN samples ago).
+            data->z_history[data->z_history_idx] = z_now;
+            data->z_history_idx = (data->z_history_idx + 1) % LIFT_FILTER_Z_HIST_LEN;
+            uint8_t z_oldest = data->z_history[data->z_history_idx];
+            if (z_now > data->z_peak) data->z_peak = z_now;
+
+            int abs_total = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+            // EMA alpha = 1/8 in Q8.
+            data->vel_smoothed_q8 =
+                (data->vel_smoothed_q8 * 7 + (int32_t)abs_total * 256) / 8;
+
+            int z_slope = (int)z_now - (int)z_oldest;
+            bool z_peak_ok   = data->z_peak >= LIFT_FILTER_Z_PEAK_MIN;
+            bool z_below_pct = (int)z_now * 100 <= (int)data->z_peak * LIFT_FILTER_Z_DROP_PCT;
+            bool z_falling   = z_slope <= -LIFT_FILTER_Z_DROP_DELTA;
+            bool vel_low     = data->vel_smoothed_q8 <= LIFT_FILTER_VEL_LOW_Q8;
+            // Cold-start interlock: z_history is zero-filled at touch start,
+            // so z_oldest=0, z_slope>=0, z_falling=false until the ring fills.
+            if (z_peak_ok && z_below_pct && z_falling && vel_low) {
+                dx = 0;
+                dy = 0;
+                data->smooth_accum_x_q8 = 0;
+                data->smooth_accum_y_q8 = 0;
+            }
+        }
     }
 
     // Fast-tap state machine: hold motion back during the could-be-tap
@@ -1024,6 +1081,7 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .disable_filter = DT_INST_PROP(n, disable_filter),                                         \
         .smoothing_strength = DT_INST_PROP(n, smoothing_strength),                                 \
         .tap_fast = DT_INST_PROP(n, tap_fast),                                                     \
+        .lift_filter = DT_INST_PROP(n, lift_filter),                                               \
         .absolute_mode = DT_INST_PROP(n, absolute_mode),                                           \
         .abs_rel_divisor = DT_INST_PROP(n, abs_rel_divisor),                                       \
         .absolute_mode_scale_to_width = DT_INST_PROP(n, absolute_mode_scale_to_width),             \
