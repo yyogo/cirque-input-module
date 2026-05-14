@@ -1,8 +1,13 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/spi.h>
+#include <zephyr/kernel.h>
 
 #define PINNACLE_READ 0xA0
 #define PINNACLE_WRITE 0x80
@@ -73,6 +78,25 @@
 #define PINNACLE_PACKET0_X_SIGN BIT(4)   // X delta sign
 #define PINNACLE_PACKET0_Y_SIGN BIT(5)   // Y delta sign
 
+struct pinnacle_runtime_config {
+    bool disable_filter;
+    bool tap_fast;
+    bool lift_filter;
+    uint8_t num_zidle;
+    uint8_t num_zidle_pad;
+    uint8_t smoothing_strength;
+    uint8_t abs_rel_divisor;
+    uint16_t tap_fast_max_ms;
+    uint16_t tap_fast_buffer_ms;
+    uint16_t tap_fast_max_drag;
+    uint16_t tap_fast_drag_window_ms;
+    uint16_t tap_fast_phantom_ms;
+    uint8_t lift_filter_z_peak_min;
+    uint8_t lift_filter_z_drop_pct;
+    uint8_t lift_filter_z_drop_delta;
+    uint16_t lift_filter_vel_low_q8;
+};
+
 struct pinnacle_data {
     uint8_t btn_cache; // the prior button reading
     uint8_t last_btn; // the current button reading
@@ -113,6 +137,8 @@ struct pinnacle_data {
     bool tap_drag_held;               // true while a synthesized BTN_PRIM is held for a drag
 
     const struct device *dev;
+    struct k_mutex runtime_lock;
+    struct pinnacle_runtime_config runtime;
     struct gpio_callback gpio_cb;
     struct k_work work;
 };
@@ -148,3 +174,9 @@ struct pinnacle_config {
 
 int pinnacle_set_sleep(const struct device *dev, bool enabled);
 int pinnacle_set_shutdown(const struct device *dev, bool enabled);
+
+size_t pinnacle_runtime_param_count(void);
+const char *pinnacle_runtime_param_name(size_t index);
+int pinnacle_runtime_get(const struct device *dev, const char *name, int32_t *value);
+int pinnacle_runtime_set(const struct device *dev, const char *name, int32_t value);
+int pinnacle_runtime_reset(const struct device *dev);

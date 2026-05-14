@@ -32,6 +32,16 @@ config INPUT_PINNACLE_TOUCAN_PROFILE_DUMP
       DT settings so the dump always carries raw positions. Intended
       for offline analysis of trackpad behavior; do not ship.
 
+config INPUT_PINNACLE_TOUCAN_RUNTIME_TUNING
+    bool "Expose Pinnacle runtime tuning shell commands"
+    default n
+    depends on SHELL
+    help
+      Adds a Zephyr shell command named `trackpad` for volatile tuning
+      of the Toucan-specific Pinnacle post-processing parameters.
+      Values apply immediately and reset to devicetree defaults after
+      reboot; intended for interactive tuning over USB CDC ACM.
+
 if ZMK_MOUSE
 
 config ZMK_INPUT_PINNACLE_TOUCAN_IDLE_SLEEPER

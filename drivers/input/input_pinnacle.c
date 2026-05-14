@@ -1,5 +1,8 @@
 #define DT_DRV_COMPAT cirque_pinnacle_toucan
 
+#include <stddef.h>
+#include <string.h>
+
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/init.h>
 #include <zephyr/input/input.h>
@@ -65,6 +68,314 @@ static int pinnacle_write(const struct device *dev, const uint8_t addr, const ui
 #define LIFT_FILTER_Z_DROP_PCT    60        // current Z below 60% of peak
 #define LIFT_FILTER_Z_DROP_DELTA  5         // Z dropped >=5 across the window
 #define LIFT_FILTER_VEL_LOW_Q8    (3 * 256) // smoothed velocity below 3 units/sample
+
+enum pinnacle_runtime_param_type {
+    PINNACLE_RUNTIME_BOOL,
+    PINNACLE_RUNTIME_U8,
+    PINNACLE_RUNTIME_U16,
+};
+
+#define PINNACLE_RUNTIME_APPLY_FEED_CFG1 BIT(0)
+#define PINNACLE_RUNTIME_APPLY_FEED_CFG2 BIT(1)
+#define PINNACLE_RUNTIME_APPLY_Z_IDLE    BIT(2)
+
+struct pinnacle_runtime_param_desc {
+    const char *name;
+    enum pinnacle_runtime_param_type type;
+    int32_t min;
+    int32_t max;
+    size_t offset;
+    uint8_t apply_flags;
+};
+
+#define PINNACLE_RUNTIME_PARAM(_name, _type, _min, _max, _field, _flags)                         \
+    {                                                                                            \
+        .name = _name, .type = _type, .min = _min, .max = _max,                                  \
+        .offset = offsetof(struct pinnacle_runtime_config, _field), .apply_flags = _flags,       \
+    }
+
+static const struct pinnacle_runtime_param_desc pinnacle_runtime_params[] = {
+    PINNACLE_RUNTIME_PARAM("disable_filter", PINNACLE_RUNTIME_BOOL, 0, 1, disable_filter,
+                           PINNACLE_RUNTIME_APPLY_FEED_CFG1),
+    PINNACLE_RUNTIME_PARAM("tap_fast", PINNACLE_RUNTIME_BOOL, 0, 1, tap_fast,
+                           PINNACLE_RUNTIME_APPLY_FEED_CFG2),
+    PINNACLE_RUNTIME_PARAM("lift_filter", PINNACLE_RUNTIME_BOOL, 0, 1, lift_filter, 0),
+    PINNACLE_RUNTIME_PARAM("num_zidle", PINNACLE_RUNTIME_U8, 1, 20, num_zidle,
+                           PINNACLE_RUNTIME_APPLY_Z_IDLE),
+    PINNACLE_RUNTIME_PARAM("num_zidle_pad", PINNACLE_RUNTIME_U8, 0, 20, num_zidle_pad,
+                           PINNACLE_RUNTIME_APPLY_Z_IDLE),
+    PINNACLE_RUNTIME_PARAM("smoothing_strength", PINNACLE_RUNTIME_U8, 0, 16,
+                           smoothing_strength, 0),
+    PINNACLE_RUNTIME_PARAM("abs_rel_divisor", PINNACLE_RUNTIME_U8, 0, 32, abs_rel_divisor,
+                           PINNACLE_RUNTIME_APPLY_FEED_CFG1),
+    PINNACLE_RUNTIME_PARAM("tap_fast_max_ms", PINNACLE_RUNTIME_U16, 1, 1000,
+                           tap_fast_max_ms, 0),
+    PINNACLE_RUNTIME_PARAM("tap_fast_buffer_ms", PINNACLE_RUNTIME_U16, 0, 1000,
+                           tap_fast_buffer_ms, 0),
+    PINNACLE_RUNTIME_PARAM("tap_fast_max_drag", PINNACLE_RUNTIME_U16, 0, 255,
+                           tap_fast_max_drag, 0),
+    PINNACLE_RUNTIME_PARAM("tap_fast_drag_window_ms", PINNACLE_RUNTIME_U16, 0, 1000,
+                           tap_fast_drag_window_ms, 0),
+    PINNACLE_RUNTIME_PARAM("tap_fast_phantom_ms", PINNACLE_RUNTIME_U16, 0, 1000,
+                           tap_fast_phantom_ms, 0),
+    PINNACLE_RUNTIME_PARAM("lift_filter_z_peak_min", PINNACLE_RUNTIME_U8, 0, 63,
+                           lift_filter_z_peak_min, 0),
+    PINNACLE_RUNTIME_PARAM("lift_filter_z_drop_pct", PINNACLE_RUNTIME_U8, 0, 100,
+                           lift_filter_z_drop_pct, 0),
+    PINNACLE_RUNTIME_PARAM("lift_filter_z_drop_delta", PINNACLE_RUNTIME_U8, 0, 63,
+                           lift_filter_z_drop_delta, 0),
+    PINNACLE_RUNTIME_PARAM("lift_filter_vel_low_q8", PINNACLE_RUNTIME_U16, 0, 65535,
+                           lift_filter_vel_low_q8, 0),
+};
+
+static struct pinnacle_runtime_config
+pinnacle_runtime_default_config(const struct pinnacle_config *config) {
+    return (struct pinnacle_runtime_config){
+        .disable_filter = config->disable_filter,
+        .tap_fast = config->tap_fast,
+        .lift_filter = config->lift_filter,
+        .num_zidle = NUM_ZIDLE,
+        .num_zidle_pad = NUM_ZIDLE_PAD,
+        .smoothing_strength = config->smoothing_strength,
+        .abs_rel_divisor = config->abs_rel_divisor,
+        .tap_fast_max_ms = TAP_FAST_MAX_MS,
+        .tap_fast_buffer_ms = TAP_FAST_BUFFER_MS,
+        .tap_fast_max_drag = TAP_FAST_MAX_DRAG,
+        .tap_fast_drag_window_ms = TAP_FAST_DRAG_WINDOW_MS,
+        .tap_fast_phantom_ms = TAP_FAST_PHANTOM_MS,
+        .lift_filter_z_peak_min = LIFT_FILTER_Z_PEAK_MIN,
+        .lift_filter_z_drop_pct = LIFT_FILTER_Z_DROP_PCT,
+        .lift_filter_z_drop_delta = LIFT_FILTER_Z_DROP_DELTA,
+        .lift_filter_vel_low_q8 = LIFT_FILTER_VEL_LOW_Q8,
+    };
+}
+
+static const struct pinnacle_runtime_param_desc *pinnacle_runtime_find_param(const char *name) {
+    for (size_t i = 0; i < ARRAY_SIZE(pinnacle_runtime_params); i++) {
+        if (strcmp(name, pinnacle_runtime_params[i].name) == 0) {
+            return &pinnacle_runtime_params[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int32_t pinnacle_runtime_read_value(const struct pinnacle_runtime_config *runtime,
+                                           const struct pinnacle_runtime_param_desc *desc) {
+    const uint8_t *field = (const uint8_t *)runtime + desc->offset;
+
+    switch (desc->type) {
+    case PINNACLE_RUNTIME_BOOL:
+        return *(const bool *)field ? 1 : 0;
+    case PINNACLE_RUNTIME_U8:
+        return *(const uint8_t *)field;
+    case PINNACLE_RUNTIME_U16:
+        return *(const uint16_t *)field;
+    default:
+        return 0;
+    }
+}
+
+static void pinnacle_runtime_write_value(struct pinnacle_runtime_config *runtime,
+                                         const struct pinnacle_runtime_param_desc *desc,
+                                         int32_t value) {
+    uint8_t *field = (uint8_t *)runtime + desc->offset;
+
+    switch (desc->type) {
+    case PINNACLE_RUNTIME_BOOL:
+        *(bool *)field = value != 0;
+        break;
+    case PINNACLE_RUNTIME_U8:
+        *(uint8_t *)field = (uint8_t)value;
+        break;
+    case PINNACLE_RUNTIME_U16:
+        *(uint16_t *)field = (uint16_t)value;
+        break;
+    }
+}
+
+static uint8_t pinnacle_feed_cfg1_value(const struct pinnacle_config *config,
+                                        const struct pinnacle_runtime_config *runtime) {
+    uint8_t feed_cfg1 = PINNACLE_FEED_CFG1_EN_FEED;
+
+    if (IS_ENABLED(CONFIG_INPUT_PINNACLE_TOUCAN_PROFILE_DUMP) ||
+        config->absolute_mode || runtime->abs_rel_divisor) {
+        feed_cfg1 |= PINNACLE_FEED_CFG1_ABS_MODE;
+    }
+    if (config->x_invert) {
+        feed_cfg1 |= PINNACLE_FEED_CFG1_INV_X;
+    }
+    if (config->y_invert) {
+        feed_cfg1 |= PINNACLE_FEED_CFG1_INV_Y;
+    }
+    if (runtime->disable_filter) {
+        feed_cfg1 |= PINNACLE_FEED_CFG1_DIS_FILT;
+    }
+
+    return feed_cfg1;
+}
+
+static uint8_t pinnacle_feed_cfg2_value(const struct pinnacle_config *config,
+                                        const struct pinnacle_runtime_config *runtime) {
+    uint8_t feed_cfg2 = PINNACLE_FEED_CFG2_EN_IM | PINNACLE_FEED_CFG2_EN_BTN_SCRL;
+
+    if (config->no_taps || runtime->tap_fast) {
+        feed_cfg2 |= PINNACLE_FEED_CFG2_DIS_TAP;
+    }
+    if (config->no_secondary_tap || runtime->tap_fast) {
+        feed_cfg2 |= PINNACLE_FEED_CFG2_DIS_SEC;
+    }
+    if (config->rotate_90) {
+        feed_cfg2 |= PINNACLE_FEED_CFG2_ROTATE_90;
+    }
+
+    return feed_cfg2;
+}
+
+static int pinnacle_apply_runtime_hw_locked(const struct device *dev, uint8_t apply_flags) {
+    const struct pinnacle_config *config = dev->config;
+    struct pinnacle_data *data = dev->data;
+    int ret = 0;
+
+    if (apply_flags & PINNACLE_RUNTIME_APPLY_Z_IDLE) {
+        ret = pinnacle_write(dev, PINNACLE_Z_IDLE,
+                             data->runtime.num_zidle + data->runtime.num_zidle_pad);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    if (apply_flags & PINNACLE_RUNTIME_APPLY_FEED_CFG2) {
+        ret = pinnacle_write(dev, PINNACLE_FEED_CFG2,
+                             pinnacle_feed_cfg2_value(config, &data->runtime));
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    if (apply_flags & PINNACLE_RUNTIME_APPLY_FEED_CFG1) {
+        ret = pinnacle_write(dev, PINNACLE_FEED_CFG1,
+                             pinnacle_feed_cfg1_value(config, &data->runtime));
+    }
+
+    return ret;
+}
+
+static void pinnacle_runtime_clear_motion_state_locked(const struct device *dev) {
+    struct pinnacle_data *data = dev->data;
+
+    if (data->tap_drag_held) {
+        input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+    }
+
+    data->num_z_idle = data->runtime.num_zidle;
+    data->smooth_accum_x_q8 = 0;
+    data->smooth_accum_y_q8 = 0;
+    memset(data->z_history, 0, sizeof(data->z_history));
+    data->z_history_idx = 0;
+    data->z_peak = 0;
+    data->vel_smoothed_q8 = 0;
+    data->pending_dx = 0;
+    data->pending_dy = 0;
+    data->has_pending = false;
+    data->touch_active = false;
+    data->last_lift_ms = 0;
+    data->tap_touch_started_ms = 0;
+    data->tap_buf_dx = 0;
+    data->tap_buf_dy = 0;
+    data->tap_motion_total = 0;
+    data->tap_motion_committed = 0;
+    data->tap_buffering = false;
+    data->tap_eligible = false;
+    data->tap_completed_ms = 0;
+    data->tap_drag_held = false;
+}
+
+size_t pinnacle_runtime_param_count(void) {
+    return ARRAY_SIZE(pinnacle_runtime_params);
+}
+
+const char *pinnacle_runtime_param_name(size_t index) {
+    if (index >= ARRAY_SIZE(pinnacle_runtime_params)) {
+        return NULL;
+    }
+
+    return pinnacle_runtime_params[index].name;
+}
+
+int pinnacle_runtime_get(const struct device *dev, const char *name, int32_t *value) {
+    if (!dev || !name || !value) {
+        return -EINVAL;
+    }
+
+    const struct pinnacle_runtime_param_desc *desc = pinnacle_runtime_find_param(name);
+    if (!desc) {
+        return -ENOENT;
+    }
+
+    struct pinnacle_data *data = dev->data;
+    k_mutex_lock(&data->runtime_lock, K_FOREVER);
+    *value = pinnacle_runtime_read_value(&data->runtime, desc);
+    k_mutex_unlock(&data->runtime_lock);
+
+    return 0;
+}
+
+int pinnacle_runtime_set(const struct device *dev, const char *name, int32_t value) {
+    if (!dev || !name) {
+        return -EINVAL;
+    }
+
+    const struct pinnacle_runtime_param_desc *desc = pinnacle_runtime_find_param(name);
+    if (!desc) {
+        return -ENOENT;
+    }
+    if (value < desc->min || value > desc->max) {
+        return -ERANGE;
+    }
+
+    struct pinnacle_data *data = dev->data;
+    k_mutex_lock(&data->runtime_lock, K_FOREVER);
+
+    struct pinnacle_runtime_config old_runtime = data->runtime;
+    pinnacle_runtime_write_value(&data->runtime, desc, value);
+
+    int ret = pinnacle_apply_runtime_hw_locked(dev, desc->apply_flags);
+    if (ret < 0) {
+        data->runtime = old_runtime;
+    } else {
+        pinnacle_runtime_clear_motion_state_locked(dev);
+    }
+
+    k_mutex_unlock(&data->runtime_lock);
+
+    return ret;
+}
+
+int pinnacle_runtime_reset(const struct device *dev) {
+    if (!dev) {
+        return -EINVAL;
+    }
+
+    struct pinnacle_data *data = dev->data;
+    const struct pinnacle_config *config = dev->config;
+
+    k_mutex_lock(&data->runtime_lock, K_FOREVER);
+
+    struct pinnacle_runtime_config old_runtime = data->runtime;
+    data->runtime = pinnacle_runtime_default_config(config);
+
+    int ret = pinnacle_apply_runtime_hw_locked(dev, PINNACLE_RUNTIME_APPLY_FEED_CFG1 |
+                                                        PINNACLE_RUNTIME_APPLY_FEED_CFG2 |
+                                                        PINNACLE_RUNTIME_APPLY_Z_IDLE);
+    if (ret < 0) {
+        data->runtime = old_runtime;
+    } else {
+        pinnacle_runtime_clear_motion_state_locked(dev);
+    }
+
+    k_mutex_unlock(&data->runtime_lock);
+
+    return ret;
+}
 
 #if DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
 
@@ -314,7 +625,8 @@ static void pinnacle_apply_smoothing(struct pinnacle_data *data, uint8_t strengt
     *dy = (int8_t)out_dy;
 }
 
-static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
+static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy,
+                              const struct pinnacle_runtime_config *runtime) {
     const struct pinnacle_config *config = dev->config;
     struct pinnacle_data *data = dev->data;
 
@@ -350,7 +662,7 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
         }
     } else {
         data->num_z_idle++;
-        if(data->num_z_idle == NUM_ZIDLE) {
+        if(data->num_z_idle == runtime->num_zidle) {
             touch_changed = true;
         }
         dx = 0;
@@ -370,7 +682,7 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
         must_send = true;
     }
 
-    pinnacle_apply_smoothing(data, config->smoothing_strength, &dx, &dy);
+    pinnacle_apply_smoothing(data, runtime->smoothing_strength, &dx, &dy);
 
     // The chip-level touch_changed flag fires on any z=0 -> z>0 resume,
     // including transients mid-touch. NUM_ZIDLE filters very short z=0
@@ -382,7 +694,7 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
     bool resumed = touch_changed && is_touching && !data->touch_active;
     bool phantom_resume = resumed &&
                           data->last_lift_ms != 0 &&
-                          now_ms - data->last_lift_ms < TAP_FAST_PHANTOM_MS &&
+                          now_ms - data->last_lift_ms < runtime->tap_fast_phantom_ms &&
                           data->tap_completed_ms == 0;
     bool real_touch_start = resumed && !phantom_resume;
     if (touch_changed && is_touching) {
@@ -398,7 +710,7 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
     // (real-motion) sample, then drops the pending zero at the confirmed
     // lift edge -- the artifact never reaches the host. tap_motion_total
     // isn't charged by the zeroed sample, so tap classification stays clean.
-    if (config->lift_filter) {
+    if (runtime->lift_filter) {
         if (real_touch_start) {
             memset(data->z_history, 0, sizeof(data->z_history));
             data->z_history_idx = 0;
@@ -420,10 +732,11 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
                 (data->vel_smoothed_q8 * 7 + (int32_t)abs_total * 256) / 8;
 
             int z_slope = (int)z_now - (int)z_oldest;
-            bool z_peak_ok   = data->z_peak >= LIFT_FILTER_Z_PEAK_MIN;
-            bool z_below_pct = (int)z_now * 100 <= (int)data->z_peak * LIFT_FILTER_Z_DROP_PCT;
-            bool z_falling   = z_slope <= -LIFT_FILTER_Z_DROP_DELTA;
-            bool vel_low     = data->vel_smoothed_q8 <= LIFT_FILTER_VEL_LOW_Q8;
+            bool z_peak_ok   = data->z_peak >= runtime->lift_filter_z_peak_min;
+            bool z_below_pct = (int)z_now * 100 <=
+                               (int)data->z_peak * runtime->lift_filter_z_drop_pct;
+            bool z_falling   = z_slope <= -runtime->lift_filter_z_drop_delta;
+            bool vel_low     = data->vel_smoothed_q8 <= runtime->lift_filter_vel_low_q8;
             // Cold-start interlock: z_history is zero-filled at touch start,
             // so z_oldest=0, z_slope>=0, z_falling=false until the ring fills.
             if (z_peak_ok && z_below_pct && z_falling && vel_low) {
@@ -439,7 +752,7 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
     // window so a tap with slight finger drift doesn't drag the cursor;
     // synthesize a click on a quick lift; if a new touch arrives soon
     // after that click, treat it as a held-button drag.
-    if (config->tap_fast) {
+    if (runtime->tap_fast) {
         int64_t now = now_ms;
 
         if (real_touch_start) {
@@ -455,7 +768,7 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
             // the user wants the previous click to "stick" — emit BTN_PRIM
             // press now, hold until lift, no buffering on this touch.
             if (data->tap_completed_ms != 0 &&
-                now - data->tap_completed_ms < TAP_FAST_DRAG_WINDOW_MS) {
+                now - data->tap_completed_ms < runtime->tap_fast_drag_window_ms) {
                 input_report_key(dev, INPUT_BTN_0, 1, false, K_FOREVER);
                 data->tap_drag_held = true;
                 data->tap_buffering = false;
@@ -478,8 +791,8 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
             data->tap_buf_dy += dy;
             int64_t duration = now - data->tap_touch_started_ms;
 
-            if (data->tap_motion_committed > TAP_FAST_MAX_DRAG ||
-                duration > TAP_FAST_MAX_MS) {
+            if (data->tap_motion_committed > runtime->tap_fast_max_drag ||
+                duration > runtime->tap_fast_max_ms) {
                 data->tap_eligible = false;
             }
 
@@ -487,9 +800,9 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
                 // Flush only when motion is real or the user is clearly
                 // dragging — a still finger past BUFFER_MS keeps buffering
                 // so a slow tap (held still then lifted) still clicks.
-                bool motion_flush = data->tap_motion_total > TAP_FAST_MAX_DRAG;
+                bool motion_flush = data->tap_motion_total > runtime->tap_fast_max_drag;
                 bool time_flush = data->tap_motion_total > 0 &&
-                                  duration > TAP_FAST_BUFFER_MS;
+                                  duration > runtime->tap_fast_buffer_ms;
                 if (motion_flush || time_flush) {
                     int32_t fx = data->tap_buf_dx;
                     int32_t fy = data->tap_buf_dy;
@@ -640,18 +953,18 @@ static void pinnacle_report_data_abs_rel(const struct device *dev) {
     struct pinnacle_data *data = dev->data;
     int16_t old_x = data->last_x;
     int16_t old_y = data->last_y;
+    uint8_t divisor = data->runtime.abs_rel_divisor;
 
     int ret = pinnacle_read_abs(dev);
 
-    if (ret == 0) {
+    if (ret == 0 && divisor) {
         int16_t dx = data->last_x - old_x;
         int16_t dy = data->last_y - old_y;
-        const struct pinnacle_config *config = dev->config;
 
-        dx /= config->abs_rel_divisor;
-        dy /= config->abs_rel_divisor;
+        dx /= divisor;
+        dy /= divisor;
 
-        pinnacle_send_rel(dev, (int8_t) dx, (int8_t) dy);
+        pinnacle_send_rel(dev, (int8_t) dx, (int8_t) dy, &data->runtime);
     }
 }
 
@@ -694,7 +1007,7 @@ static void pinnacle_report_data_rel(const struct device *dev) {
 
     // always claim touch changed
     data->last_z = 1;
-    pinnacle_send_rel(dev, (int8_t) dx, (int8_t) dy);
+    pinnacle_send_rel(dev, (int8_t) dx, (int8_t) dy, &data->runtime);
 }
 
 #if IS_ENABLED(CONFIG_INPUT_PINNACLE_TOUCAN_PROFILE_DUMP)
@@ -725,13 +1038,15 @@ static void pinnacle_work_cb(struct k_work *work) {
 #else
     const struct pinnacle_config *config = dev->config;
 
+    k_mutex_lock(&data->runtime_lock, K_FOREVER);
     if (config->absolute_mode) {
         pinnacle_report_data_abs(dev);
-    } else if (config->abs_rel_divisor) {
+    } else if (data->runtime.abs_rel_divisor) {
         pinnacle_report_data_abs_rel(dev);
     } else {
         pinnacle_report_data_rel(dev);
     }
+    k_mutex_unlock(&data->runtime_lock);
 #endif
 }
 
@@ -917,6 +1232,10 @@ static int pinnacle_init(const struct device *dev) {
     const struct pinnacle_config *config = dev->config;
     int ret;
 
+    k_mutex_init(&data->runtime_lock);
+    data->runtime = pinnacle_runtime_default_config(config);
+    data->dev = dev;
+
     uint8_t fw_id[2];
     ret = pinnacle_seq_read(dev, PINNACLE_FW_ID, fw_id, 2);
     if (ret < 0) {
@@ -938,7 +1257,8 @@ static int pinnacle_init(const struct device *dev) {
         return ret;
     }
     k_msleep(20);
-    ret = pinnacle_write(dev, PINNACLE_Z_IDLE, NUM_ZIDLE + NUM_ZIDLE_PAD);
+    ret = pinnacle_write(dev, PINNACLE_Z_IDLE,
+                         data->runtime.num_zidle + data->runtime.num_zidle_pad);
     if (ret < 0) {
         LOG_ERR("can't write %d", ret);
         return ret;
@@ -980,40 +1300,17 @@ static int pinnacle_init(const struct device *dev) {
         LOG_DBG("Failed to update sleep interaval %d", ret);
     }
 
-    uint8_t feed_cfg2 = PINNACLE_FEED_CFG2_EN_IM | PINNACLE_FEED_CFG2_EN_BTN_SCRL;
-    if (config->no_taps || config->tap_fast) {
-        feed_cfg2 |= PINNACLE_FEED_CFG2_DIS_TAP;
-    }
-
-    if (config->no_secondary_tap || config->tap_fast) {
-        feed_cfg2 |= PINNACLE_FEED_CFG2_DIS_SEC;
-    }
-
-    if (config->rotate_90) {
-        feed_cfg2 |= PINNACLE_FEED_CFG2_ROTATE_90;
-    }
+    uint8_t feed_cfg2 = pinnacle_feed_cfg2_value(config, &data->runtime);
     ret = pinnacle_write(dev, PINNACLE_FEED_CFG2, feed_cfg2);
     if (ret < 0) {
         LOG_ERR("can't write %d", ret);
         return ret;
     }
-    uint8_t feed_cfg1 = PINNACLE_FEED_CFG1_EN_FEED;
-    if (IS_ENABLED(CONFIG_INPUT_PINNACLE_TOUCAN_PROFILE_DUMP) ||
-        config->absolute_mode || config->abs_rel_divisor) {
-        feed_cfg1 |= PINNACLE_FEED_CFG1_ABS_MODE;
+    uint8_t feed_cfg1 = pinnacle_feed_cfg1_value(config, &data->runtime);
+    if (feed_cfg1 & PINNACLE_FEED_CFG1_ABS_MODE) {
         LOG_ERR("Using absolute mode");
     } else {
         LOG_ERR("Using relative mode");
-    }
-    if (config->x_invert) {
-        feed_cfg1 |= PINNACLE_FEED_CFG1_INV_X;
-    }
-
-    if (config->y_invert) {
-        feed_cfg1 |= PINNACLE_FEED_CFG1_INV_Y;
-    }
-    if (config->disable_filter) {
-        feed_cfg1 |= PINNACLE_FEED_CFG1_DIS_FILT;
     }
     if (feed_cfg1) {
         ret = pinnacle_write(dev, PINNACLE_FEED_CFG1, feed_cfg1);
@@ -1022,8 +1319,6 @@ static int pinnacle_init(const struct device *dev) {
         LOG_ERR("can't write %d", ret);
         return ret;
     }
-
-    data->dev = dev;
 
     pinnacle_clear_status(dev);
 

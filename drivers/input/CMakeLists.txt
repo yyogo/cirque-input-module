@@ -4,5 +4,6 @@
 zephyr_library_amend()
 
 zephyr_library_sources_ifdef(CONFIG_INPUT_PINNACLE_TOUCAN input_pinnacle.c)
+zephyr_library_sources_ifdef(CONFIG_INPUT_PINNACLE_TOUCAN_RUNTIME_TUNING pinnacle_tuning_shell.c)
 
 target_sources_ifdef(CONFIG_ZMK_INPUT_PINNACLE_TOUCAN_IDLE_SLEEPER app PRIVATE zmk_pinnacle_idle_sleeper.c)
