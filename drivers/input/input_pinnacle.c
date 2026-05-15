@@ -69,6 +69,13 @@ static int pinnacle_write(const struct device *dev, const uint8_t addr, const ui
 #define LIFT_FILTER_Z_DROP_DELTA  5         // Z dropped >=5 across the window
 #define LIFT_FILTER_VEL_LOW_Q8    (3 * 256) // smoothed velocity below 3 units/sample
 
+// Timeouts copied from Zephyr's upstream Pinnacle driver. ERA operations
+// should complete in ~50ms; calibration should complete in ~200ms.
+#define PINNACLE_ERA_AWAIT_DELAY_POLL_US 10000
+#define PINNACLE_ERA_AWAIT_RETRY_COUNT   5
+#define PINNACLE_CALIBRATION_AWAIT_DELAY_POLL_US 50000
+#define PINNACLE_CALIBRATION_AWAIT_RETRY_COUNT   4
+
 enum pinnacle_runtime_param_type {
     PINNACLE_RUNTIME_BOOL,
     PINNACLE_RUNTIME_U8,
@@ -494,99 +501,159 @@ static int pinnacle_clear_status(const struct device *dev) {
     return ret;
 }
 
-static int pinnacle_era_read(const struct device *dev, const uint16_t addr, uint8_t *val) {
-    int ret;
+static int pinnacle_wait_for_era_completion(const struct device *dev) {
+    int ret = 0;
+    uint8_t control_val = 0;
 
-    set_int(dev, false);
+    bool complete = WAIT_FOR((ret = pinnacle_seq_read(dev, PINNACLE_REG_ERA_CONTROL,
+                                                      &control_val, 1)) == 0 &&
+                                 control_val == PINNACLE_ERA_CONTROL_COMPLETE,
+                             PINNACLE_ERA_AWAIT_RETRY_COUNT *
+                                 PINNACLE_ERA_AWAIT_DELAY_POLL_US,
+                             k_sleep(K_USEC(PINNACLE_ERA_AWAIT_DELAY_POLL_US)));
+    if (!complete) {
+        if (ret < 0) {
+            LOG_ERR("Failed to read ERA control (%d)", ret);
+            return ret;
+        }
 
-    ret = pinnacle_write(dev, PINNACLE_REG_ERA_HIGH_BYTE, (uint8_t)(addr >> 8));
+        LOG_ERR("Timed out waiting for ERA completion");
+        return -EIO;
+    }
+
+    return 0;
+}
+
+static int pinnacle_era_read_body(const struct device *dev, uint16_t addr, uint8_t *val) {
+    int ret = pinnacle_write(dev, PINNACLE_REG_ERA_HIGH_BYTE, (uint8_t)(addr >> 8));
     if (ret < 0) {
         LOG_ERR("Failed to write ERA high byte (%d)", ret);
-        return -EIO;
+        return ret;
     }
 
     ret = pinnacle_write(dev, PINNACLE_REG_ERA_LOW_BYTE, (uint8_t)(addr & 0x00FF));
     if (ret < 0) {
         LOG_ERR("Failed to write ERA low byte (%d)", ret);
-        return -EIO;
+        return ret;
     }
 
     ret = pinnacle_write(dev, PINNACLE_REG_ERA_CONTROL, PINNACLE_ERA_CONTROL_READ);
     if (ret < 0) {
         LOG_ERR("Failed to write ERA control (%d)", ret);
-        return -EIO;
+        return ret;
     }
 
-    uint8_t control_val;
-    do {
-
-        ret = pinnacle_seq_read(dev, PINNACLE_REG_ERA_CONTROL, &control_val, 1);
-        if (ret < 0) {
-            LOG_ERR("Failed to read ERA control (%d)", ret);
-            return -EIO;
-        }
-
-    } while (control_val != 0x00);
+    ret = pinnacle_wait_for_era_completion(dev);
+    if (ret < 0) {
+        return ret;
+    }
 
     ret = pinnacle_seq_read(dev, PINNACLE_REG_ERA_VALUE, val, 1);
-
     if (ret < 0) {
         LOG_ERR("Failed to read ERA value (%d)", ret);
-        return -EIO;
+        return ret;
     }
 
-    ret = pinnacle_clear_status(dev);
-
-    set_int(dev, true);
-
-    return ret;
+    return 0;
 }
 
-static int pinnacle_era_write(const struct device *dev, const uint16_t addr, uint8_t val) {
-    int ret;
-
-    set_int(dev, false);
-
-    ret = pinnacle_write(dev, PINNACLE_REG_ERA_VALUE, val);
+static int pinnacle_era_write_body(const struct device *dev, uint16_t addr, uint8_t val) {
+    int ret = pinnacle_write(dev, PINNACLE_REG_ERA_VALUE, val);
     if (ret < 0) {
         LOG_ERR("Failed to write ERA value (%d)", ret);
-        return -EIO;
+        return ret;
     }
 
     ret = pinnacle_write(dev, PINNACLE_REG_ERA_HIGH_BYTE, (uint8_t)(addr >> 8));
     if (ret < 0) {
         LOG_ERR("Failed to write ERA high byte (%d)", ret);
-        return -EIO;
+        return ret;
     }
 
     ret = pinnacle_write(dev, PINNACLE_REG_ERA_LOW_BYTE, (uint8_t)(addr & 0x00FF));
     if (ret < 0) {
         LOG_ERR("Failed to write ERA low byte (%d)", ret);
-        return -EIO;
+        return ret;
     }
 
     ret = pinnacle_write(dev, PINNACLE_REG_ERA_CONTROL, PINNACLE_ERA_CONTROL_WRITE);
     if (ret < 0) {
         LOG_ERR("Failed to write ERA control (%d)", ret);
-        return -EIO;
+        return ret;
     }
 
-    uint8_t control_val;
-    do {
+    return pinnacle_wait_for_era_completion(dev);
+}
 
-        ret = pinnacle_seq_read(dev, PINNACLE_REG_ERA_CONTROL, &control_val, 1);
-        if (ret < 0) {
-            LOG_ERR("Failed to read ERA control (%d)", ret);
-            return -EIO;
-        }
+// Per spec §App, the data feed must be disabled around ERA and SW_CC cleared
+// after. Disabling the feed drops touch reports for the duration of the ERA op
+// (a few ms during init, brief cursor pause if invoked at runtime).
+static int pinnacle_era_read(const struct device *dev, const uint16_t addr, uint8_t *val) {
+    uint8_t saved_feed;
+    int ret = pinnacle_seq_read(dev, PINNACLE_FEED_CFG1, &saved_feed, 1);
+    if (ret < 0) {
+        LOG_ERR("Failed to read FEED_CFG1 for ERA (%d)", ret);
+        return ret;
+    }
 
-    } while (control_val != 0x00);
+    set_int(dev, false);
 
-    ret = pinnacle_clear_status(dev);
+    int op_ret = pinnacle_write(dev, PINNACLE_FEED_CFG1,
+                                saved_feed & ~PINNACLE_FEED_CFG1_EN_FEED);
+    if (op_ret < 0) {
+        LOG_ERR("Failed to disable feed for ERA (%d)", op_ret);
+    } else {
+        op_ret = pinnacle_era_read_body(dev, addr, val);
+    }
 
-    set_int(dev, true);
+    int status_ret = pinnacle_clear_status(dev);
+    int feed_ret = pinnacle_write(dev, PINNACLE_FEED_CFG1, saved_feed);
+    int int_ret = set_int(dev, true);
 
-    return ret;
+    if (op_ret == 0 && status_ret < 0) {
+        op_ret = status_ret;
+    }
+    if (op_ret == 0 && feed_ret < 0) {
+        op_ret = feed_ret;
+    }
+    if (op_ret == 0 && int_ret < 0) {
+        op_ret = int_ret;
+    }
+    return op_ret;
+}
+
+static int pinnacle_era_write(const struct device *dev, const uint16_t addr, uint8_t val) {
+    uint8_t saved_feed;
+    int ret = pinnacle_seq_read(dev, PINNACLE_FEED_CFG1, &saved_feed, 1);
+    if (ret < 0) {
+        LOG_ERR("Failed to read FEED_CFG1 for ERA (%d)", ret);
+        return ret;
+    }
+
+    set_int(dev, false);
+
+    int op_ret = pinnacle_write(dev, PINNACLE_FEED_CFG1,
+                                saved_feed & ~PINNACLE_FEED_CFG1_EN_FEED);
+    if (op_ret < 0) {
+        LOG_ERR("Failed to disable feed for ERA (%d)", op_ret);
+    } else {
+        op_ret = pinnacle_era_write_body(dev, addr, val);
+    }
+
+    int status_ret = pinnacle_clear_status(dev);
+    int feed_ret = pinnacle_write(dev, PINNACLE_FEED_CFG1, saved_feed);
+    int int_ret = set_int(dev, true);
+
+    if (op_ret == 0 && status_ret < 0) {
+        op_ret = status_ret;
+    }
+    if (op_ret == 0 && feed_ret < 0) {
+        op_ret = feed_ret;
+    }
+    if (op_ret == 0 && int_ret < 0) {
+        op_ret = int_ret;
+    }
+    return op_ret;
 }
 
 static void pinnacle_apply_smoothing(struct pinnacle_data *data, uint8_t strength,
@@ -1153,11 +1220,46 @@ static int pinnacle_force_recalibrate(const struct device *dev) {
         return ret;
     }
 
-    do {
-        pinnacle_seq_read(dev, PINNACLE_CAL_CFG, &val, 1);
-    } while (val & 0x01);
+    bool complete = WAIT_FOR((ret = pinnacle_seq_read(dev, PINNACLE_CAL_CFG, &val, 1)) == 0 &&
+                                 !(val & BIT(0)),
+                             PINNACLE_CALIBRATION_AWAIT_RETRY_COUNT *
+                                 PINNACLE_CALIBRATION_AWAIT_DELAY_POLL_US,
+                             k_sleep(K_USEC(PINNACLE_CALIBRATION_AWAIT_DELAY_POLL_US)));
+    if (!complete) {
+        if (ret < 0) {
+            LOG_ERR("Failed to read cal config %d", ret);
+            return ret;
+        }
 
-    return ret;
+        LOG_ERR("Timed out waiting for forced calibration");
+        return -EIO;
+    }
+
+    // Spec §Command Complete: SW_CC asserts after calibration; clear it so
+    // HW_DR drops and the next caller doesn't read a stale flag.
+    return pinnacle_clear_status(dev);
+}
+
+static int pinnacle_wait_for_reset_calibration(const struct device *dev) {
+    int ret = 0;
+    uint8_t status = 0;
+
+    bool complete = WAIT_FOR((ret = pinnacle_seq_read(dev, PINNACLE_STATUS1, &status, 1)) == 0 &&
+                                 (status & PINNACLE_STATUS1_SW_CC),
+                             PINNACLE_CALIBRATION_AWAIT_RETRY_COUNT *
+                                 PINNACLE_CALIBRATION_AWAIT_DELAY_POLL_US,
+                             k_sleep(K_USEC(PINNACLE_CALIBRATION_AWAIT_DELAY_POLL_US)));
+    if (!complete) {
+        if (ret < 0) {
+            LOG_ERR("Failed to read STATUS1 during reset calibration (%d)", ret);
+            return ret;
+        }
+
+        LOG_ERR("Timed out waiting for reset calibration");
+        return -EIO;
+    }
+
+    return 0;
 }
 
 int pinnacle_set_sleep(const struct device *dev, bool enabled) {
@@ -1242,6 +1344,12 @@ static int pinnacle_init(const struct device *dev) {
     ret = pinnacle_seq_read(dev, PINNACLE_FW_ID, fw_id, 2);
     if (ret < 0) {
         LOG_ERR("Failed to get the FW ID %d", ret);
+        return ret;
+    }
+
+    if (fw_id[0] != PINNACLE_EXPECTED_FW_ID) {
+        LOG_ERR("Incorrect Firmware ASIC ID 0x%02x", fw_id[0]);
+        return -ENODEV;
     }
 
     LOG_DBG("Found device with FW ID: 0x%02x, Version: 0x%02x", fw_id[0], fw_id[1]);
@@ -1258,7 +1366,14 @@ static int pinnacle_init(const struct device *dev) {
         LOG_ERR("can't reset %d", ret);
         return ret;
     }
-    k_msleep(20);
+    ret = pinnacle_wait_for_reset_calibration(dev);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = pinnacle_clear_status(dev);
+    if (ret < 0) {
+        return ret;
+    }
     ret = pinnacle_write(dev, PINNACLE_Z_IDLE,
                          data->runtime.num_zidle + data->runtime.num_zidle_pad);
     if (ret < 0) {
@@ -1324,7 +1439,16 @@ static int pinnacle_init(const struct device *dev) {
 
     pinnacle_clear_status(dev);
 
-    gpio_pin_configure_dt(&config->dr, GPIO_INPUT);
+    if (!gpio_is_ready_dt(&config->dr)) {
+        LOG_ERR("GPIO device %s/%d is not ready", config->dr.port->name, config->dr.pin);
+        return -ENODEV;
+    }
+
+    ret = gpio_pin_configure_dt(&config->dr, GPIO_INPUT);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure DR GPIO: %d", ret);
+        return ret;
+    }
     gpio_init_callback(&data->gpio_cb, pinnacle_gpio_cb, BIT(config->dr.pin));
     ret = gpio_add_callback(config->dr.port, &data->gpio_cb);
     if (ret < 0) {
@@ -1395,6 +1519,21 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
     PM_DEVICE_DT_INST_DEFINE(n, pinnacle_pm_action);                                               \
     DEVICE_DT_INST_DEFINE(n, pinnacle_init, PM_DEVICE_DT_INST_GET(n), &pinnacle_data_##n,          \
                           &pinnacle_config_##n, POST_KERNEL, CONFIG_INPUT_PINNACLE_TOUCAN_INIT_PRIORITY,  \
-                          NULL);
+                          NULL);                                                                  \
+    BUILD_ASSERT(DT_INST_PROP(n, absolute_mode_clamp_min_x) <                                      \
+                     DT_INST_PROP(n, absolute_mode_clamp_max_x),                                   \
+                 "absolute-mode-clamp-min-x must be less than absolute-mode-clamp-max-x");        \
+    BUILD_ASSERT(DT_INST_PROP(n, absolute_mode_clamp_min_y) <                                      \
+                     DT_INST_PROP(n, absolute_mode_clamp_max_y),                                   \
+                 "absolute-mode-clamp-min-y must be less than absolute-mode-clamp-max-y");        \
+    BUILD_ASSERT(DT_INST_PROP(n, absolute_mode_scale_to_width) > 0,                                \
+                 "absolute-mode-scale-to-width must be positive");                                \
+    BUILD_ASSERT(DT_INST_PROP(n, absolute_mode_scale_to_height) > 0,                               \
+                 "absolute-mode-scale-to-height must be positive");                               \
+    BUILD_ASSERT(DT_INST_PROP(n, smoothing_strength) <= 16,                                        \
+                 "smoothing-strength must be in range [0:16]");                                   \
+    BUILD_ASSERT(DT_INST_PROP(n, abs_rel_divisor) >= 0 &&                                          \
+                     DT_INST_PROP(n, abs_rel_divisor) <= 32,                                       \
+                 "abs-rel-divisor must be in range [0:32]");
 
 DT_INST_FOREACH_STATUS_OKAY(PINNACLE_INST)

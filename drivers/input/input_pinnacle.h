@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/kernel.h>
@@ -18,6 +19,7 @@
 // Registers
 #define PINNACLE_FW_ID 0x00   // ASIC ID.
 #define PINNACLE_FW_VER 0x01  // Firmware Version Firmware revision number.
+#define PINNACLE_EXPECTED_FW_ID 0x07
 #define PINNACLE_STATUS1 0x02 // Contains status flags about the state of Pinnacle.
 #define PINNACLE_STATUS1_SW_DR BIT(2)
 #define PINNACLE_STATUS1_SW_CC BIT(3)
@@ -62,6 +64,7 @@
 
 #define PINNACLE_ERA_CONTROL_READ 0x01
 #define PINNACLE_ERA_CONTROL_WRITE 0x02
+#define PINNACLE_ERA_CONTROL_COMPLETE 0x00
 
 #define PINNACLE_ERA_REG_X_AXIS_WIDE_Z_MIN 0x0149
 #define PINNACLE_ERA_REG_Y_AXIS_WIDE_Z_MIN 0x0168
