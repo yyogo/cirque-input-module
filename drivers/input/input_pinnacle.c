@@ -1143,12 +1143,14 @@ static int pinnacle_force_recalibrate(const struct device *dev) {
     int ret = pinnacle_seq_read(dev, PINNACLE_CAL_CFG, &val, 1);
     if (ret < 0) {
         LOG_ERR("Failed to get cal config %d", ret);
+        return ret;
     }
 
     val |= 0x01;
     ret = pinnacle_write(dev, PINNACLE_CAL_CFG, val);
     if (ret < 0) {
         LOG_ERR("Failed to force calibration %d", ret);
+        return ret;
     }
 
     do {
